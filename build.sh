@@ -9,8 +9,10 @@ BUNDLE_ID="com.invursestudio.metalhudlogger"
 VERSION="1.0"
 APP="$APP_NAME.app"
 
-swift build -c release
-BIN_DIR="$(swift build -c release --show-bin-path)"
+# Universal binary (Apple Silicon + Intel).
+ARCHS=(--arch arm64 --arch x86_64)
+swift build -c release "${ARCHS[@]}"
+BIN_DIR="$(swift build -c release "${ARCHS[@]}" --show-bin-path)"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -55,3 +57,11 @@ PLIST
 codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --verbose "$APP"
 echo "Built $(pwd)/$APP"
+
+# ./build.sh --zip also makes the release archive.
+if [[ "${1:-}" == "--zip" ]]; then
+    ZIP="MetalHUD-Logger-$VERSION.zip"
+    rm -f "$ZIP"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+    echo "Built $(pwd)/$ZIP"
+fi
