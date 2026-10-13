@@ -56,6 +56,8 @@ PLIST
 
 codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --verbose "$APP"
+# rm -rf + recreate leaves LaunchServices with the old bundle's info (e.g. a missing icon); re-register it.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
 echo "Built $(pwd)/$APP"
 
 # ./build.sh --zip also makes the release archive.
