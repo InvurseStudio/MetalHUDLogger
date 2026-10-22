@@ -21,6 +21,11 @@ struct RunRecord: Codable, Identifiable, Hashable {
     var averageFPS: Double
     var low1: Double
     var low01: Double
+    // Optional so history saved before temperatures were tracked still decodes.
+    var cpuTempAverage: Double?
+    var cpuTempMax: Double?
+    var gpuTempAverage: Double?
+    var gpuTempMax: Double?
     var csvPath: String
     var summaryPath: String
     var summary: String
@@ -57,7 +62,8 @@ enum RunWriter {
                      label: String,
                      warmupSeconds: Int,
                      duration: RunDuration,
-                     start: Date) throws -> RunRecord {
+                     start: Date,
+                     temperatures: TemperatureStats) throws -> RunRecord {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let stampFormatter = DateFormatter()
@@ -98,6 +104,9 @@ enum RunWriter {
             "Max frame time:    \(String(format: "%.2f", stats?.maxFrameTimeMs ?? 0)) ms",
             "Avg GPU time:      \(gpuTimes.isEmpty ? "n/a" : String(format: "%.2f ms", gpuTimes.reduce(0, +) / Double(gpuTimes.count)))",
             "Frame misses:      \(analysed.map(\.misses).reduce(0, +))",
+            "",
+            "CPU temp:          avg \(formatTemperature(temperatures.cpuAverage)), max \(formatTemperature(temperatures.cpuMax))",
+            "GPU temp:          avg \(formatTemperature(temperatures.gpuAverage)), max \(formatTemperature(temperatures.gpuMax))",
         ]
         if frames.contains(where: \.approximate) {
             lines.append("")
@@ -121,6 +130,10 @@ enum RunWriter {
                          averageFPS: stats?.averageFPS ?? 0,
                          low1: stats?.low1 ?? 0,
                          low01: stats?.low01 ?? 0,
+                         cpuTempAverage: temperatures.cpuAverage,
+                         cpuTempMax: temperatures.cpuMax,
+                         gpuTempAverage: temperatures.gpuAverage,
+                         gpuTempMax: temperatures.gpuMax,
                          csvPath: csvURL.path,
                          summaryPath: summaryURL.path,
                          summary: summary)

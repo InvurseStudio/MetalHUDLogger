@@ -1,4 +1,3 @@
-import Charts
 import SwiftUI
 
 // MARK: - Theme
@@ -93,7 +92,7 @@ struct ContentView: View {
             if model.displayedGameIsRedacted { redactionBanner }
             tiles
             HStack(alignment: .top, spacing: 14) {
-                frameTimeChart
+                temperaturePanel
                 recordingPanel
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -215,82 +214,42 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Chart
+    // MARK: Temperatures
 
-    /// Frame ids keep counting up, so pin the x axis to the visible window instead of letting Charts include 0.
-    private var chartXDomain: ClosedRange<Int> {
-        guard let first = model.livePoints.first?.id, let last = model.livePoints.last?.id, first < last else { return 0...1 }
-        return first...last
-    }
-
-    private var hasGPUTime: Bool { model.livePoints.contains { $0.gpuTimeMs != nil } }
-
-    private var frameTimeChart: some View {
+    private var temperaturePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                SectionTitle(title: "Frame Time", systemImage: "waveform.path.ecg")
-                if let game = model.displayedGame {
-                    Text(game)
-                        .font(.callout)
-                        .foregroundStyle(Theme.textSecondary)
-                        .lineLimit(1)
-                }
+                SectionTitle(title: "Temperatures", systemImage: "thermometer.medium")
                 Spacer()
-                LegendDot(color: Theme.accent, label: "Frame")
-                if hasGPUTime { LegendDot(color: Theme.warning, label: "GPU") }
-                Text("\(model.livePoints.count) frames")
-                    .font(.caption.monospacedDigit())
+                Text(model.temperatureCaption)
+                    .font(.caption)
                     .foregroundStyle(Theme.textTertiary)
             }
 
-            Chart {
-                ForEach(model.livePoints) { point in
-                    AreaMark(x: .value("Frame", point.id),
-                             y: .value("ms", point.frameTimeMs))
-                        .foregroundStyle(LinearGradient(colors: [Theme.accent.opacity(0.28), Theme.accent.opacity(0)],
-                                                        startPoint: .top, endPoint: .bottom))
-                    LineMark(x: .value("Frame", point.id),
-                             y: .value("ms", point.frameTimeMs),
-                             series: .value("Series", "Frame time"))
-                        .foregroundStyle(Theme.accent)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
-                        .interpolationMethod(.linear)
-                    if let gpuTimeMs = point.gpuTimeMs {
-                        LineMark(x: .value("Frame", point.id),
-                                 y: .value("ms", gpuTimeMs),
-                                 series: .value("Series", "GPU time"))
-                            .foregroundStyle(Theme.warning.opacity(0.8))
-                            .lineStyle(StrokeStyle(lineWidth: 1))
-                    }
+            if model.temperatureAvailable {
+                HStack(spacing: 14) {
+                    TemperatureGauge(title: "CPU",
+                                     current: model.temperature?.cpu,
+                                     average: model.temperatureStats?.cpuAverage,
+                                     maximum: model.temperatureStats?.cpuMax,
+                                     tint: Theme.accent)
+                    TemperatureGauge(title: "GPU",
+                                     current: model.temperature?.gpu,
+                                     average: model.temperatureStats?.gpuAverage,
+                                     maximum: model.temperatureStats?.gpuMax,
+                                     tint: Theme.warning)
                 }
-            }
-            .chartXScale(domain: chartXDomain)
-            .chartXAxis(.hidden)
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine().foregroundStyle(Theme.border)
-                    AxisValueLabel {
-                        if let ms = value.as(Double.self) {
-                            Text("\(ms, specifier: "%.0f") ms").foregroundStyle(Theme.textTertiary)
-                        }
-                    }
+                .frame(maxHeight: .infinity)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "thermometer.medium.slash")
+                        .font(.title)
+                        .foregroundStyle(Theme.textTertiary)
+                    Text("Couldn’t read temperature sensors on this Mac.")
+                        .foregroundStyle(Theme.textSecondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .overlay {
-                if model.livePoints.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "dot.radiowaves.left.and.right")
-                            .font(.title)
-                            .foregroundStyle(Theme.textTertiary)
-                        Text(model.games.isEmpty
-                             ? "Waiting for metal-HUD data.\nEnable HUD logging, then launch the game."
-                             : "Waiting for frames…")
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-            }
-            .frame(minHeight: 220)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .card()
@@ -415,6 +374,10 @@ struct ContentView: View {
                     .width(70)
                 TableColumn("0.1% Low") { Text(formatFPS($0.low01)).monospacedDigit().foregroundStyle(Theme.danger) }
                     .width(70)
+                TableColumn("CPU °C") { Text(formatTemperatureRange($0.cpuTempAverage, $0.cpuTempMax)).monospacedDigit() }
+                    .width(70)
+                TableColumn("GPU °C") { Text(formatTemperatureRange($0.gpuTempAverage, $0.gpuTempMax)).monospacedDigit() }
+                    .width(70)
             }
             .tableStyle(.inset(alternatesRowBackgrounds: false))
             .scrollContentBackground(.hidden)
@@ -503,14 +466,76 @@ private struct StatTile: View {
     }
 }
 
-private struct LegendDot: View {
-    let color: Color
-    let label: String
+/// Current temperature with the average and peak over the caption's window. The bar spans 20–110 °C.
+private struct TemperatureGauge: View {
+    let title: String
+    let current: Double?
+    let average: Double?
+    let maximum: Double?
+    let tint: Color
+
+    private static let range = 20.0...110.0
+
+    private static func fraction(_ celsius: Double) -> CGFloat {
+        CGFloat((min(max(celsius, range.lowerBound), range.upperBound) - range.lowerBound)
+                / (range.upperBound - range.lowerBound))
+    }
 
     var body: some View {
-        HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 7, height: 7)
-            Text(label).font(.caption).foregroundStyle(Theme.textSecondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 2).fill(tint).frame(width: 3, height: 12)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Text(formatTemperature(current))
+                .font(.system(size: 40, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(current == nil ? Theme.textTertiary : Theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.background)
+                    if let current {
+                        Capsule()
+                            .fill(LinearGradient(colors: [tint.opacity(0.6), tint], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: max(6, geometry.size.width * Self.fraction(current)))
+                    }
+                    if let maximum {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Theme.textPrimary)
+                            .frame(width: 2, height: 12)
+                            .offset(x: geometry.size.width * Self.fraction(maximum) - 1)
+                    }
+                }
+            }
+            .frame(height: 6)
+            .help("Bar spans 20–110 °C; the tick marks the maximum.")
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 18) {
+                summary("Avg", average)
+                summary("Max", maximum)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.surfaceRaised))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.border))
+    }
+
+    private func summary(_ label: String, _ value: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            FieldLabel(label)
+            Text(formatTemperature(value))
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(value == nil ? Theme.textTertiary : Theme.textPrimary)
         }
     }
 }

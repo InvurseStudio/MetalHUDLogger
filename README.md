@@ -6,7 +6,7 @@
 
 <p align="center">
   Benchmark macOS games using Apple's built-in Metal Performance HUD: live FPS, 1% / 0.1% lows,
-  frame-time graph, and recorded runs saved as CSV.
+  CPU / GPU temperatures, and recorded runs saved as CSV.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 ## Features
 
 - **Live stats** — current FPS, average FPS, 1% low and 0.1% low for the game in focus.
-- **Frame-time graph** of the last 900 frames (with GPU time when available).
+- **CPU and GPU temperatures** — current, average and max, read from the SMC (no root needed). Each run's average and max are saved with it.
 - **Benchmark runs** — fixed-length or manual recordings with an optional warm-up, saved as a per-frame CSV plus a text summary.
 - **Global hotkey ⌃⌥R** starts and stops recording, even while a game is fullscreen.
 - **Automatic game detection** — any Metal app writing HUD logs shows up, including Windows games running through Wine / Game Porting Toolkit (named after their `.exe`).

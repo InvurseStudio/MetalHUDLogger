@@ -12,12 +12,6 @@ struct DetectedGame: Identifiable, Equatable {
     var isActive: Bool { Date().timeIntervalSince(lastSeen) < 5 }
 }
 
-struct ChartPoint: Identifiable {
-    let id: Int
-    let frameTimeMs: Double
-    let gpuTimeMs: Double?
-}
-
 enum RunDuration: Int, CaseIterable, Identifiable {
     case manual = 0, s30 = 30, s60 = 60, s90 = 90, s120 = 120, s180 = 180
     var id: Int { rawValue }
@@ -36,10 +30,16 @@ final class BenchmarkModel: ObservableObject {
     var displayedGameIsRedacted: Bool { games.first { $0.name == displayedGame }?.isRedacted ?? false }
 
     // Live data
-    @Published private(set) var livePoints: [ChartPoint] = []
+    @Published private(set) var liveFrameTimes: [Double] = []   // ms, most recent last
     @Published private(set) var liveFPS: Double?
     @Published private(set) var stats: FrameStats?
     @Published private(set) var statsCaption = "Last 900 frames"
+
+    // Temperatures
+    @Published private(set) var temperature: TemperatureSample?
+    @Published private(set) var temperatureStats: TemperatureStats?
+    @Published private(set) var temperatureCaption = "Last 2 minutes"
+    @Published private(set) var temperatureAvailable = true
 
     // Recording
     @Published var label = ""
@@ -61,10 +61,16 @@ final class BenchmarkModel: ObservableObject {
     private var runWarmup = 0
     private var runDuration: RunDuration = .manual
     private var runLabel = ""
-    private var pointCounter = 0
     private var lastCounters: [Int32: (frame: Int, time: Date)] = [:]
     private let streamer = LogStreamer()
     private var hotKey: GlobalHotKey?
+
+    static let temperatureWindow: TimeInterval = 120
+    private var recentTemperatures: [(time: Date, sample: TemperatureSample)] = []
+    private var runTemperatures: [(elapsed: Double, sample: TemperatureSample)] = []
+    private var temperatureSensor: TemperatureSensor?
+    private let temperatureQueue = DispatchQueue(label: "TemperatureSensor", qos: .utility)
+    private var temperatureTimer: Timer?
 
     init() {
         history = RunStore.load()
@@ -76,6 +82,8 @@ final class BenchmarkModel: ObservableObject {
 
         hotKey = GlobalHotKey { [weak self] in self?.toggleRecording() }
         hotKeyRegistered = hotKey != nil
+
+        startTemperatureSampling()
 
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: .main) { [weak self] _ in
@@ -98,7 +106,7 @@ final class BenchmarkModel: ObservableObject {
         let target = recordingGame ?? resolvedSelection
         guard target != displayedGame else { return }
         displayedGame = target
-        livePoints = []
+        liveFrameTimes = []
         liveFPS = nil
         updateStats()
     }
@@ -140,26 +148,23 @@ final class BenchmarkModel: ObservableObject {
         samples.forEach(noteGame)
         refreshDisplayedGame()
 
-        var points = livePoints
+        var frameTimes = liveFrameTimes
         for sample in samples where !sample.frames.isEmpty {
             if isRecording {
                 if recordingGame == nil {
                     recordingGame = sample.process
                     refreshDisplayedGame()
-                    points = livePoints
+                    frameTimes = liveFrameTimes
                 }
                 if sample.process == recordingGame { appendRecorded(sample) }
             }
             if sample.process == displayedGame {
-                for frame in sample.frames {
-                    pointCounter += 1
-                    points.append(ChartPoint(id: pointCounter, frameTimeMs: frame.frameTimeMs, gpuTimeMs: frame.gpuTimeMs))
-                }
+                frameTimes.append(contentsOf: sample.frames.map(\.frameTimeMs))
             }
         }
-        if points.count > Self.liveCapacity { points.removeFirst(points.count - Self.liveCapacity) }
-        livePoints = points
-        liveFPS = Self.fpsOverLastSecond(points)
+        if frameTimes.count > Self.liveCapacity { frameTimes.removeFirst(frameTimes.count - Self.liveCapacity) }
+        liveFrameTimes = frameTimes
+        liveFPS = Self.fpsOverLastSecond(frameTimes)
 
         checkAutoStop()
         updateStats()
@@ -186,10 +191,10 @@ final class BenchmarkModel: ObservableObject {
         }
     }
 
-    private static func fpsOverLastSecond(_ points: [ChartPoint]) -> Double? {
+    private static func fpsOverLastSecond(_ frameTimesMs: [Double]) -> Double? {
         var total = 0.0, count = 0
-        for point in points.reversed() {
-            total += point.frameTimeMs
+        for frameTimeMs in frameTimesMs.reversed() {
+            total += frameTimeMs
             count += 1
             if total >= 1000 { break }
         }
@@ -211,7 +216,56 @@ final class BenchmarkModel: ObservableObject {
             }
         } else {
             statsCaption = displayedGameIsRedacted ? "Per-second averages" : "Last \(Self.liveCapacity) frames"
-            stats = FrameStats.compute(livePoints.map(\.frameTimeMs))
+            stats = FrameStats.compute(liveFrameTimes)
+        }
+    }
+
+    // MARK: Temperatures
+
+    private func startTemperatureSampling() {
+        // Key discovery walks every SMC key, so keep it (and the reads) off the main thread.
+        temperatureQueue.async { [weak self] in
+            let sensor = TemperatureSensor()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.temperatureSensor = sensor
+                self.temperatureAvailable = sensor.isAvailable
+                guard sensor.isAvailable else { return }
+                self.temperatureTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                    self?.sampleTemperature()
+                }
+                self.sampleTemperature()
+            }
+        }
+    }
+
+    private func sampleTemperature() {
+        guard let sensor = temperatureSensor else { return }
+        temperatureQueue.async { [weak self] in
+            let sample = sensor.read()
+            DispatchQueue.main.async { self?.ingestTemperature(sample) }
+        }
+    }
+
+    private func ingestTemperature(_ sample: TemperatureSample) {
+        let now = Date()
+        temperature = sample
+        recentTemperatures.append((now, sample))
+        recentTemperatures.removeAll { now.timeIntervalSince($0.time) > Self.temperatureWindow }
+        // Samples before the first frame arrives can't be placed relative to the warm-up.
+        if isRecording, recordingElapsed > 0 { runTemperatures.append((recordingElapsed, sample)) }
+        updateTemperatureStats()
+    }
+
+    private func updateTemperatureStats() {
+        if isRecording {
+            let warmup = Double(runWarmup)
+            let measured = runTemperatures.filter { $0.elapsed > warmup }
+            temperatureCaption = measured.isEmpty ? "Waiting for this run" : "This run (excl. warm-up)"
+            temperatureStats = measured.isEmpty ? nil : TemperatureStats.compute(measured.map(\.sample))
+        } else {
+            temperatureCaption = "Last 2 minutes"
+            temperatureStats = recentTemperatures.isEmpty ? nil : TemperatureStats.compute(recentTemperatures.map(\.sample))
         }
     }
 
@@ -234,6 +288,7 @@ final class BenchmarkModel: ObservableObject {
         guard !isRecording else { return }
         recorded = []
         recordingElapsed = 0
+        runTemperatures = []
         recordingStart = Date()
         runWarmup = warmupSeconds
         runDuration = duration
@@ -244,6 +299,7 @@ final class BenchmarkModel: ObservableObject {
         NSSound(named: "Glass")?.play()
         refreshDisplayedGame()
         updateStats()
+        updateTemperatureStats()
     }
 
     func stopRecording() {
@@ -253,10 +309,17 @@ final class BenchmarkModel: ObservableObject {
 
         let frames = recorded
         let game = recordingGame
+        // Same warm-up rule as the frame stats: fall back to everything if the warm-up covered the run.
+        let lastElapsed = frames.last?.elapsed ?? 0
+        let inRun = runTemperatures.filter { $0.elapsed <= lastElapsed + 1 }
+        let measured = inRun.filter { $0.elapsed > Double(runWarmup) }
+        let temperatures = TemperatureStats.compute((measured.isEmpty ? inRun : measured).map(\.sample))
         recorded = []
+        runTemperatures = []
         recordingGame = nil
         refreshDisplayedGame()
         updateStats()
+        updateTemperatureStats()
 
         guard let game, !frames.isEmpty else {
             notice = "Recording stopped — no frames were captured."
@@ -265,7 +328,7 @@ final class BenchmarkModel: ObservableObject {
         do {
             let run = try RunWriter.save(frames: frames, game: game, label: runLabel,
                                          warmupSeconds: runWarmup, duration: runDuration,
-                                         start: recordingStart)
+                                         start: recordingStart, temperatures: temperatures)
             history.insert(run, at: 0)
             notice = "Saved \(URL(fileURLWithPath: run.csvPath).lastPathComponent)"
         } catch {
