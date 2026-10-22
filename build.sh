@@ -1,13 +1,43 @@
 #!/bin/bash
-# Builds MetalHUD Logger in release mode, wraps it in an .app bundle and ad-hoc signs it.
+# Builds MetalHUD Logger in release mode, wraps it in an .app bundle and signs it.
+#
+#   ./build.sh               build and sign
+#   ./build.sh --zip         also make the release archive
+#   ./build.sh --notarize    also notarize with Apple, staple the ticket and make the release archive
+#
+# Signing uses the first "Developer ID Application" certificate in the keychain (override with
+# SIGN_IDENTITY=...), or an ad-hoc signature if there is none. --notarize needs a Developer ID and
+# notarytool credentials stored once with:
+#   xcrun notarytool store-credentials MetalHUDLogger --apple-id <email> --team-id <team>
+# (override the profile name with NOTARY_PROFILE=...).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+MODE="${1:-}"
+if [[ -n "$MODE" && "$MODE" != "--zip" && "$MODE" != "--notarize" ]]; then
+    echo "Unknown option: $MODE (expected --zip or --notarize)" >&2
+    exit 1
+fi
 
 APP_NAME="MetalHUD Logger"
 EXECUTABLE="MetalHUDLogger"
 BUNDLE_ID="com.invursestudio.metalhudlogger"
 VERSION="1.0"
 APP="$APP_NAME.app"
+ZIP="MetalHUD-Logger-$VERSION.zip"
+NOTARY_PROFILE="${NOTARY_PROFILE:-MetalHUDLogger}"
+
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning \
+        | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n 1)"
+fi
+if [[ -z "$SIGN_IDENTITY" ]]; then
+    if [[ "$MODE" == "--notarize" ]]; then
+        echo "Notarization needs a Developer ID Application certificate; none found in the keychain." >&2
+        exit 1
+    fi
+    SIGN_IDENTITY="-"
+fi
 
 # Universal binary (Apple Silicon + Intel).
 ARCHS=(--arch arm64 --arch x86_64)
@@ -54,15 +84,31 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign - --timestamp=none "$APP"
-codesign --verify --verbose "$APP"
+# Hardened runtime and a secure timestamp are required for notarization.
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    echo "No Developer ID certificate found; signing ad-hoc (not notarizable)."
+    codesign --force --sign - --options runtime --timestamp=none "$APP"
+else
+    echo "Signing with: $SIGN_IDENTITY"
+    codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp "$APP"
+fi
+codesign --verify --strict --verbose "$APP"
 # rm -rf + recreate leaves LaunchServices with the old bundle's info (e.g. a missing icon); re-register it.
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
 echo "Built $(pwd)/$APP"
 
-# ./build.sh --zip also makes the release archive.
-if [[ "${1:-}" == "--zip" ]]; then
-    ZIP="MetalHUD-Logger-$VERSION.zip"
+if [[ "$MODE" == "--notarize" ]]; then
+    # notarytool takes a zip; the ticket is then stapled to the app itself so it validates offline.
+    rm -f "$ZIP"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+    xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    spctl --assess --type execute --verbose "$APP"
+fi
+
+if [[ "$MODE" == "--zip" || "$MODE" == "--notarize" ]]; then
+    # Re-zip after stapling so the archive contains the ticket.
     rm -f "$ZIP"
     ditto -c -k --keepParent "$APP" "$ZIP"
     echo "Built $(pwd)/$ZIP"
