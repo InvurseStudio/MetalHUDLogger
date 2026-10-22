@@ -22,7 +22,7 @@ fi
 APP_NAME="MetalHUD Logger"
 EXECUTABLE="MetalHUDLogger"
 BUNDLE_ID="com.invursestudio.metalhudlogger"
-VERSION="1.0"
+VERSION="1.1"
 APP="$APP_NAME.app"
 ZIP="MetalHUD-Logger-$VERSION.zip"
 NOTARY_PROFILE="${NOTARY_PROFILE:-MetalHUDLogger}"

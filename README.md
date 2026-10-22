@@ -37,8 +37,7 @@ computes statistics. No injection, no special entitlements, no Accessibility per
 Download `MetalHUD-Logger-<version>.zip` from the [latest release](https://github.com/InvurseStudio/MetalHUDLogger/releases/latest),
 unzip it and move **MetalHUD Logger** to Applications. It's a universal app (Apple Silicon and Intel).
 
-The app is ad-hoc signed, not notarized, so the first launch is blocked by Gatekeeper. Open it once, then go to
-**System Settings › Privacy & Security** and click **Open Anyway**. Or build it yourself (below).
+The app is signed with a Developer ID and notarized by Apple, so it opens normally. Or build it yourself (below).
 
 ## Requirements
 
